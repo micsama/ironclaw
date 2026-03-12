@@ -1,6 +1,10 @@
 # Agent Rules
 
-## Feature Parity Update Policy
+当前分支以应用探索和二次开发思考为主，不以正式功能开发为目标。
 
-- If you change implementation status for any feature tracked in `FEATURE_PARITY.md`, update that file in the same branch.
-- Do not open a PR that changes feature behavior without checking `FEATURE_PARITY.md` for needed status updates (`❌`, `🚧`, `✅`, notes, and priorities).
+执行时遵循以下原则：
+
+- 优先帮助分析方案、梳理方向、评估可行性
+- 仅在必要时进行少量代码修改
+- 避免大范围功能实现、重构和开发流程约束
+- 回答和改动以快速验证想法为优先
