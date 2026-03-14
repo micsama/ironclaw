@@ -1,6 +1,33 @@
 {
   "version": "0.2.1",
   "wit_version": "0.3.0",
+  "description": "GitHub integration for managing repositories, issues, pull requests, and workflows. Supports reading repo info, listing/creating issues, reviewing PRs, and triggering GitHub Actions.",
+  "parameters": {
+    "type": "object",
+    "required": ["action"],
+    "oneOf": [
+      { "properties": { "action": { "const": "get_repo" }, "owner": { "type": "string" }, "repo": { "type": "string" } }, "required": ["action", "owner", "repo"] },
+      { "properties": { "action": { "const": "list_issues" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "state": { "type": "string", "enum": ["open", "closed", "all"], "default": "open" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "owner", "repo"] },
+      { "properties": { "action": { "const": "create_issue" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "title": { "type": "string" }, "body": { "type": "string" }, "labels": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "owner", "repo", "title"] },
+      { "properties": { "action": { "const": "get_issue" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "issue_number": { "type": "integer" } }, "required": ["action", "owner", "repo", "issue_number"] },
+      { "properties": { "action": { "const": "list_issue_comments" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "issue_number": { "type": "integer" }, "page": { "type": "integer" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "owner", "repo", "issue_number"] },
+      { "properties": { "action": { "const": "create_issue_comment" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "issue_number": { "type": "integer" }, "body": { "type": "string" } }, "required": ["action", "owner", "repo", "issue_number", "body"] },
+      { "properties": { "action": { "const": "list_pull_requests" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "state": { "type": "string", "enum": ["open", "closed", "all"], "default": "open" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "owner", "repo"] },
+      { "properties": { "action": { "const": "create_pull_request" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "title": { "type": "string" }, "head": { "type": "string" }, "base": { "type": "string" }, "body": { "type": "string" }, "draft": { "type": "boolean", "default": false } }, "required": ["action", "owner", "repo", "title", "head", "base"] },
+      { "properties": { "action": { "const": "get_pull_request" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "pr_number": { "type": "integer" } }, "required": ["action", "owner", "repo", "pr_number"] },
+      { "properties": { "action": { "const": "get_pull_request_files" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "pr_number": { "type": "integer" } }, "required": ["action", "owner", "repo", "pr_number"] },
+      { "properties": { "action": { "const": "create_pr_review" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "pr_number": { "type": "integer" }, "body": { "type": "string" }, "event": { "type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] } }, "required": ["action", "owner", "repo", "pr_number", "body", "event"] },
+      { "properties": { "action": { "const": "list_pull_request_comments" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "pr_number": { "type": "integer" }, "page": { "type": "integer" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "owner", "repo", "pr_number"] },
+      { "properties": { "action": { "const": "reply_pull_request_comment" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "comment_id": { "type": "integer" }, "body": { "type": "string" } }, "required": ["action", "owner", "repo", "comment_id", "body"] },
+      { "properties": { "action": { "const": "get_pull_request_reviews" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "pr_number": { "type": "integer" }, "page": { "type": "integer" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "owner", "repo", "pr_number"] },
+      { "properties": { "action": { "const": "get_combined_status" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "ref": { "type": "string" } }, "required": ["action", "owner", "repo", "ref"] },
+      { "properties": { "action": { "const": "merge_pull_request" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "pr_number": { "type": "integer" }, "commit_title": { "type": "string" }, "commit_message": { "type": "string" }, "merge_method": { "type": "string", "enum": ["merge", "squash", "rebase"], "default": "merge" } }, "required": ["action", "owner", "repo", "pr_number"] },
+      { "properties": { "action": { "const": "list_repos" }, "username": { "type": "string" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "username"] },
+      { "properties": { "action": { "const": "get_file_content" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "path": { "type": "string" }, "ref": { "type": "string" } }, "required": ["action", "owner", "repo", "path"] },
+      { "properties": { "action": { "const": "trigger_workflow" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "workflow_id": { "type": "string" }, "ref": { "type": "string" }, "inputs": { "type": "object" } }, "required": ["action", "owner", "repo", "workflow_id", "ref"] },
+      { "properties": { "action": { "const": "get_workflow_runs" }, "owner": { "type": "string" }, "repo": { "type": "string" }, "workflow_id": { "type": "string" }, "limit": { "type": "integer", "default": 30 } }, "required": ["action", "owner", "repo"] }
+    ]
+  },
   "capabilities": {
     "webhook": {
       "hmac_secret_name": "github_webhook_secret",
