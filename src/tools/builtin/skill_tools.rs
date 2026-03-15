@@ -1315,6 +1315,9 @@ mod tests {
             .get("url")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
-        assert!(url.is_none(), "empty url string should be treated as absent");
+        assert!(
+            url.is_none(),
+            "empty url string should be treated as absent"
+        );
     }
 }

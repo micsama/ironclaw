@@ -248,12 +248,14 @@ impl ExtensionManager {
         self.tunnel_url
             .as_ref()
             .filter(|u| !u.is_empty())
-            .and_then(|raw| url::Url::parse(raw).ok())
-            .and_then(|u| u.host_str().map(String::from))
-            .filter(|host| !oauth_defaults::is_loopback_host(host))
-            .map(|_| {
-                let base = self.tunnel_url.as_ref().unwrap().trim_end_matches('/');
-                format!("{}/oauth/callback", base)
+            .and_then(|raw| {
+                let url = url::Url::parse(raw).ok()?;
+                let host = url.host_str().map(String::from)?;
+                if oauth_defaults::is_loopback_host(&host) {
+                    return None;
+                }
+                let base = raw.trim_end_matches('/');
+                Some(format!("{}/oauth/callback", base))
             })
     }
 
@@ -1309,8 +1311,12 @@ impl ExtensionManager {
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
-                let primary_err = primary_result.unwrap_err();
-                let fallback = entry.fallback_source.as_ref().unwrap();
+                // TryFallback guarantees primary is Err and fallback_source is Some.
+                let (primary_err, fallback) = match (primary_result, entry.fallback_source.as_ref())
+                {
+                    (Err(e), Some(f)) => (e, f),
+                    (other, _) => return other,
+                };
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
@@ -2858,9 +2864,16 @@ impl ExtensionManager {
         // Try to list and create tools.
         // A 401/auth error means the server requires OAuth — surface as
         // AuthRequired so the activate handler triggers the OAuth flow.
+        // Some servers (e.g. GitHub MCP) return 400 with "Authorization header
+        // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            if msg.contains("requires authentication") || msg.contains("401") {
+            let msg_lower = msg.to_ascii_lowercase();
+            if msg_lower.contains("requires authentication")
+                || msg.contains("401")
+                || (msg.contains("400")
+                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
+            {
                 ExtensionError::AuthRequired
             } else {
                 ExtensionError::ActivationFailed(msg)
@@ -3837,11 +3850,12 @@ impl ExtensionManager {
                     secret_name, name
                 )));
             }
-            if secret_value.trim().is_empty() {
+            let trimmed_value = secret_value.trim();
+            if trimmed_value.is_empty() {
                 continue;
             }
             let params =
-                CreateSecretParams::new(secret_name, secret_value).with_provider(name.to_string());
+                CreateSecretParams::new(secret_name, trimmed_value).with_provider(name.to_string());
             self.secrets
                 .create(&self.user_id, params)
                 .await
