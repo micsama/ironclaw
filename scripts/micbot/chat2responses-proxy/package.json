@@ -1,0 +1,12 @@
+{
+  "name": "micbot-chat2responses-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Translate OpenAI Chat Completions requests into Responses API requests for IronClaw.",
+  "type": "module",
+  "packageManager": "bun@1",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts"
+  }
+}
