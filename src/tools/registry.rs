@@ -13,7 +13,9 @@ use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+use crate::tools::builder::{
+    BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
+};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
@@ -365,6 +367,9 @@ impl ToolRegistry {
         if let Some(slot) = scheduler_slot {
             create_tool = create_tool.with_scheduler_slot(slot);
         }
+        // Clone before moving into create_tool so cancel_job can also use them.
+        let jm_for_cancel = job_manager.clone();
+        let store_for_cancel = store.clone();
         if let Some(jm) = job_manager {
             create_tool = create_tool.with_sandbox(jm, store.clone());
         }
@@ -377,7 +382,11 @@ impl ToolRegistry {
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
-        self.register_sync(Arc::new(CancelJobTool::new(Arc::clone(&context_manager))));
+        let mut cancel_tool = CancelJobTool::new(Arc::clone(&context_manager));
+        if let Some(jm) = jm_for_cancel {
+            cancel_tool = cancel_tool.with_sandbox(jm, store_for_cancel);
+        }
+        self.register_sync(Arc::new(cancel_tool));
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
@@ -576,22 +585,23 @@ impl ToolRegistry {
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
         config: Option<BuilderConfig>,
-    ) {
+    ) -> Arc<dyn SoftwareBuilder> {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
         // Create the builder (arg order: config, llm, tools)
-        let builder = Arc::new(LlmSoftwareBuilder::new(
+        let builder: Arc<dyn SoftwareBuilder> = Arc::new(LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
             Arc::clone(self),
         ));
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+        self.register(Arc::new(BuildSoftwareTool::new(Arc::clone(&builder))))
             .await;
 
-        tracing::debug!("Registered software builder tool");
+        tracing::info!("Registered software builder tool");
+        builder
     }
 
     /// Register a WASM tool from bytes.
