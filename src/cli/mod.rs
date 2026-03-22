@@ -18,6 +18,7 @@ mod channels;
 mod completion;
 mod config;
 mod doctor;
+mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
 mod logs;
@@ -36,6 +37,7 @@ pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
@@ -202,6 +204,14 @@ pub enum Command {
     )]
     Skills(SkillsCommand),
 
+    /// Manage lifecycle hooks
+    #[command(
+        subcommand,
+        about = "Manage lifecycle hooks",
+        long_about = "List and inspect lifecycle hooks (bundled, plugin, workspace).\nExamples:\n  ironclaw hooks list\n  ironclaw hooks list --verbose\n  ironclaw hooks list --json"
+    )]
+    Hooks(HooksCommand),
+
     /// Probe external dependencies and validate configuration
     #[command(
         about = "Run diagnostics",
@@ -238,6 +248,17 @@ pub enum Command {
         long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
     )]
     Import(ImportCommand),
+
+    /// Authenticate with a provider (re-login)
+    #[command(
+        about = "Authenticate with a provider",
+        long_about = "Re-authenticate with an LLM provider.\nExample: ironclaw login --openai-codex"
+    )]
+    Login {
+        /// Authenticate with OpenAI Codex (ChatGPT subscription)
+        #[arg(long)]
+        openai_codex: bool,
+    },
 
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.

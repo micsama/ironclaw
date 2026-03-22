@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, GitHub Copilot, OpenAI Codex, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -1078,19 +1078,42 @@ impl SetupWizard {
                     .map(|s| s.display_name().to_string())
                     .unwrap_or_else(|| def.id.clone())
             } else {
-                current.clone()
+                match current.as_str() {
+                    "nearai" => "NEAR AI".to_string(),
+                    "gemini_oauth" | "gemini-oauth" => "Gemini API (OAuth)".to_string(),
+                    _ => {
+                        if let Some(def) = registry.find(&current) {
+                            def.setup
+                                .as_ref()
+                                .map(|s| s.display_name().to_string())
+                                .unwrap_or_else(|| def.id.clone())
+                        } else {
+                            current.clone()
+                        }
+                    }
+                }
             };
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known =
-                current == "nearai" || current == "bedrock" || registry.is_known(&current);
+            let is_known = current == "nearai"
+                || current == "bedrock"
+                || current == "gemini_oauth"
+                || current == "gemini-oauth"
+                || current == "openai_codex"
+                || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
-                    // Keeping the existing Bedrock config — no need to re-run
-                    // the full setup flow (region, auth, cross-region).
                     print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
+                if current == "gemini_oauth" || current == "gemini-oauth" {
+                    print_info("Keeping existing Gemini CLI OAuth configuration.");
+                    return Ok(());
+                }
+                if current == "openai_codex" {
+                    print_info("Keeping existing OpenAI Codex configuration.");
                     return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
@@ -1107,13 +1130,18 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
+        // Build menu: NearAI first, then Gemini OAuth, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
-        let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
+        let mut options: Vec<String> = Vec::with_capacity(3 + selectable.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(3 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
+        options.push("Gemini CLI        - Official Gemini API via Gemini CLI OAuth".to_string());
+        provider_ids.push("gemini_oauth".to_string());
+
+        options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
+        provider_ids.push("openai_codex".to_string());
 
         for def in &selectable {
             let label = format!(
@@ -1138,6 +1166,8 @@ impl SetupWizard {
 
         if selected_id == "bedrock" {
             self.setup_bedrock().await?;
+        } else if selected_id == "gemini_oauth" {
+            self.setup_gemini_oauth().await?;
         } else {
             self.run_provider_setup(selected_id, &registry).await?;
         }
@@ -1158,6 +1188,10 @@ impl SetupWizard {
             return self.setup_nearai().await;
         }
 
+        if provider_id == "openai_codex" {
+            return self.setup_openai_codex().await;
+        }
+
         let def = registry
             .find(provider_id)
             .ok_or_else(|| SetupError::Config(format!("Unknown provider: {}", provider_id)))?;
@@ -1176,6 +1210,10 @@ impl SetupWizard {
         // Anthropic has a custom flow: API key or OAuth token from `claude login`.
         if provider_id == "anthropic" {
             return self.setup_anthropic().await;
+        }
+
+        if provider_id == "github_copilot" {
+            return self.setup_github_copilot().await;
         }
 
         match setup {
@@ -1340,6 +1378,100 @@ impl SetupWizard {
         }
     }
 
+    async fn setup_github_copilot(&mut self) -> Result<(), SetupError> {
+        print_info("GitHub Copilot authentication:");
+        let options = &[
+            "GitHub device login (recommended)",
+            "Paste an existing token (from IDE or personal access token)",
+        ];
+        let choice = select_one("Auth method:", options).map_err(SetupError::Io)?;
+        match choice {
+            0 => self.setup_github_copilot_device_login().await,
+            _ => self.setup_github_copilot_paste_token().await,
+        }
+    }
+
+    async fn setup_github_copilot_paste_token(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("github_copilot");
+
+        print_info("Paste your GitHub token (requires an active Copilot subscription).");
+        print_info("Sources: `gh auth token`, or the oauth_token field in");
+        print_info("~/.config/github-copilot/apps.json (VS Code) or ~/.config/gh/hosts.yml.");
+        let token_secret = secret_input("GitHub Copilot token").map_err(SetupError::Io)?;
+        let token = token_secret.expose_secret().trim().to_string();
+        if token.is_empty() {
+            return Err(SetupError::Auth("No token provided".to_string()));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+
+        self.save_github_copilot_token(&client, &token).await
+    }
+
+    async fn setup_github_copilot_device_login(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("github_copilot");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+
+        let device = crate::llm::github_copilot_auth::request_device_code(&client)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+
+        print_info("Authorize IronClaw with GitHub Copilot in your browser.");
+        print_info(&format!("Verification URL: {}", device.verification_uri));
+        print_info(&format!("One-time code: {}", device.user_code));
+
+        if let Err(e) = open::that(&device.verification_uri) {
+            tracing::debug!(
+                url = %device.verification_uri,
+                error = %e,
+                "Failed to open GitHub Copilot device login URL"
+            );
+            print_info("Open the URL above manually if your browser did not launch.");
+        } else {
+            print_info("Opened your browser to GitHub device login.");
+        }
+
+        print_info("Waiting for GitHub authorization...");
+        let token = crate::llm::github_copilot_auth::wait_for_device_login(&client, &device)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+
+        self.save_github_copilot_token(&client, &token).await
+    }
+
+    async fn save_github_copilot_token(
+        &mut self,
+        client: &reqwest::Client,
+        token: &str,
+    ) -> Result<(), SetupError> {
+        crate::llm::github_copilot_auth::validate_token(client, token)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_github_copilot_token", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save GitHub token: {e}")))?;
+            print_success("GitHub Copilot token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set GITHUB_COPILOT_TOKEN in your environment.");
+        }
+
+        crate::config::inject_single_var("GITHUB_COPILOT_TOKEN", token);
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("GitHub Copilot configured");
+        Ok(())
+    }
+
     /// Anthropic OAuth setup: extract token from `claude login` credentials.
     async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("anthropic");
@@ -1487,6 +1619,29 @@ impl SetupWizard {
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
 
         print_success(&format!("{display_name} configured"));
+        Ok(())
+    }
+
+    /// OpenAI Codex (ChatGPT subscription) setup: device code OAuth flow.
+    async fn setup_openai_codex(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_codex".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        use crate::config::OpenAiCodexConfig;
+        use crate::llm::OpenAiCodexSessionManager;
+
+        let config = OpenAiCodexConfig::default();
+
+        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
+        })?;
+        mgr.device_code_login().await.map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
+        })?;
+
+        print_success("OpenAI Codex configured (ChatGPT subscription)");
         Ok(())
     }
 
@@ -1661,6 +1816,40 @@ impl SetupWizard {
         Ok(())
     }
 
+    async fn setup_gemini_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("gemini_oauth".to_string());
+        print_info("Starting Gemini CLI OAuth authentication...");
+        println!();
+
+        let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
+        let cred_manager =
+            crate::llm::gemini_oauth::CredentialManager::new(&creds_path).map_err(|e| {
+                SetupError::Config(format!(
+                    "Failed to initialize Gemini credential manager: {}",
+                    e
+                ))
+            })?;
+
+        match cred_manager.get_valid_credential().await {
+            Ok(cred) => {
+                print_success("Gemini CLI authentication successful!");
+                if let Some(ref pid) = cred.project_id {
+                    print_info(&format!("Cloud Code project: {}", pid));
+                }
+            }
+            Err(e) => {
+                return Err(SetupError::Config(format!(
+                    "Gemini CLI authentication failed: {}. Please try again.",
+                    e
+                )));
+            }
+        }
+
+        println!();
+        print_success("Gemini API configured via Gemini CLI");
+        Ok(())
+    }
+
     /// Step 4: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
@@ -1684,109 +1873,157 @@ impl SetupWizard {
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
         let registry = crate::llm::ProviderRegistry::load();
 
-        if backend == "nearai" {
-            // NEAR AI: use existing provider list_models()
-            let fetched = self.fetch_nearai_models().await;
-            let models = if fetched.is_empty() {
-                crate::llm::default_models()
-            } else {
-                fetched.iter().map(|m| (m.clone(), m.clone())).collect()
-            };
-            self.select_from_model_list(&models)?;
-        } else if let Some(def) = registry.find(backend) {
-            let can_list = def
-                .setup
-                .as_ref()
-                .map(|s| s.can_list_models())
-                .unwrap_or(false);
-
-            if can_list {
-                // Try to fetch models from the provider's /v1/models endpoint
-                let cached_key = self
-                    .llm_api_key
-                    .as_ref()
-                    .map(|k| k.expose_secret().to_string());
-
-                let models = match backend {
-                    "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
-                    "openai" => fetch_openai_models(cached_key.as_deref()).await,
-                    "ollama" => {
-                        let base_url = self
-                            .settings
-                            .ollama_base_url
-                            .as_deref()
-                            .or(def.default_base_url.as_deref())
-                            .unwrap_or("http://localhost:11434");
-                        let models = fetch_ollama_models(base_url).await;
-                        if models.is_empty() {
-                            print_info("No models found. Pull one first: ollama pull llama3");
-                        }
-                        models
-                    }
-                    _ => {
-                        // Generic OpenAI-compatible model listing
-                        let base_url = def.default_base_url.as_deref().unwrap_or("");
-                        fetch_openai_compatible_models(base_url, cached_key.as_deref()).await
-                    }
-                };
-
-                // Apply models_filter from setup hint (e.g., Groq "chat" filters non-chat models)
-                let models =
-                    if let Some(filter) = def.setup.as_ref().and_then(|s| s.models_filter()) {
-                        let filter_lower = filter.to_lowercase();
-                        models
-                            .into_iter()
-                            .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
-                            .collect()
-                    } else {
-                        models
-                    };
-
-                if models.is_empty() {
-                    // Fall back to manual entry
-                    let default = &def.default_model;
-                    let model_id = input(&format!("Model name (default: {default})"))
-                        .map_err(SetupError::Io)?;
-                    let model_id = if model_id.is_empty() {
-                        default.clone()
-                    } else {
-                        model_id
-                    };
-                    self.settings.selected_model = Some(model_id.clone());
-                    print_success(&format!("Selected {}", model_id));
+        match backend {
+            "nearai" => {
+                // NEAR AI: use existing provider list_models()
+                let fetched = self.fetch_nearai_models().await;
+                let models = if fetched.is_empty() {
+                    crate::llm::default_models()
                 } else {
-                    self.select_from_model_list(&models)?;
-                }
-            } else {
-                // Manual model entry
-                let default = &def.default_model;
+                    fetched.iter().map(|m| (m.clone(), m.clone())).collect()
+                };
+                self.select_from_model_list(&models)?;
+            }
+            "gemini_oauth" | "gemini-oauth" => {
+                let default_models: Vec<(String, String)> = vec![
+                    (
+                        "gemini-3.1-pro-preview".into(),
+                        "Gemini 3.1 Pro (Latest, strongest reasoning)".into(),
+                    ),
+                    (
+                        "gemini-3.1-pro-preview-customtools".into(),
+                        "Gemini 3.1 Pro Custom Tools (Enhanced tool use)".into(),
+                    ),
+                    (
+                        "gemini-3-pro-preview".into(),
+                        "Gemini 3 Pro (Preview)".into(),
+                    ),
+                    (
+                        "gemini-3-flash-preview".into(),
+                        "Gemini 3 Flash (Fast preview with thinking)".into(),
+                    ),
+                    (
+                        "gemini-3.1-flash-lite-preview".into(),
+                        "Gemini 3.1 Flash Lite (Preview, lightweight)".into(),
+                    ),
+                    (
+                        "gemini-2.5-pro".into(),
+                        "Gemini 2.5 Pro (Stable, strong reasoning)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash".into(),
+                        "Gemini 2.5 Flash (Fast, good quality)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash-lite".into(),
+                        "Gemini 2.5 Flash Lite (Fastest, lightweight)".into(),
+                    ),
+                ];
+                self.select_from_model_list(&default_models)?;
+            }
+            "bedrock" => {
                 let model_id =
-                    input(&format!("Model name (default: {default})")).map_err(SetupError::Io)?;
-                let model_id = if model_id.is_empty() {
-                    default.clone()
-                } else {
-                    model_id
-                };
+                    input("Bedrock model ID (e.g., anthropic.claude-v3-sonnet-20240229-v1:0)")
+                        .map_err(SetupError::Io)?;
+                if model_id.is_empty() {
+                    return Err(SetupError::Config("Model ID is required".to_string()));
+                }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
-        } else if backend == "bedrock" {
-            let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
-                .map_err(SetupError::Io)?;
-            if model_id.is_empty() {
-                return Err(SetupError::Config("Model ID is required".to_string()));
+            _ => {
+                if let Some(def) = registry.find(backend) {
+                    let can_list = def
+                        .setup
+                        .as_ref()
+                        .map(|s| s.can_list_models())
+                        .unwrap_or(false);
+
+                    if can_list {
+                        // Try to fetch models from the provider's /v1/models endpoint
+                        let cached_key = self
+                            .llm_api_key
+                            .as_ref()
+                            .map(|k| k.expose_secret().to_string());
+
+                        let models = match backend {
+                            "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
+                            "openai" => fetch_openai_models(cached_key.as_deref()).await,
+                            "ollama" => {
+                                let base_url = self
+                                    .settings
+                                    .ollama_base_url
+                                    .as_deref()
+                                    .or(def.default_base_url.as_deref())
+                                    .unwrap_or("http://localhost:11434");
+                                let models = fetch_ollama_models(base_url).await;
+                                if models.is_empty() {
+                                    print_info(
+                                        "No models found. Pull one first: ollama pull llama3",
+                                    );
+                                }
+                                models
+                            }
+                            _ => {
+                                // Generic OpenAI-compatible model listing
+                                let base_url = def.default_base_url.as_deref().unwrap_or("");
+                                fetch_openai_compatible_models(base_url, cached_key.as_deref())
+                                    .await
+                            }
+                        };
+
+                        // Apply models_filter from setup hint
+                        let models = if let Some(filter) =
+                            def.setup.as_ref().and_then(|s| s.models_filter())
+                        {
+                            let filter_lower = filter.to_lowercase();
+                            models
+                                .into_iter()
+                                .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
+                                .collect()
+                        } else {
+                            models
+                        };
+
+                        if models.is_empty() {
+                            // Fall back to manual entry
+                            let default = &def.default_model;
+                            let model_id = input(&format!("Model name (default: {default})"))
+                                .map_err(SetupError::Io)?;
+                            let model_id = if model_id.is_empty() {
+                                default.clone()
+                            } else {
+                                model_id
+                            };
+                            self.settings.selected_model = Some(model_id.clone());
+                            print_success(&format!("Selected {}", model_id));
+                        } else {
+                            self.select_from_model_list(&models)?;
+                        }
+                    } else {
+                        // Manual model entry
+                        let default = &def.default_model;
+                        let model_id = input(&format!("Model name (default: {default})"))
+                            .map_err(SetupError::Io)?;
+                        let model_id = if model_id.is_empty() {
+                            default.clone()
+                        } else {
+                            model_id
+                        };
+                        self.settings.selected_model = Some(model_id.clone());
+                        print_success(&format!("Selected {}", model_id));
+                    }
+                } else {
+                    // Unknown provider, manual entry
+                    let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
+                        .map_err(SetupError::Io)?;
+                    if model_id.is_empty() {
+                        return Err(SetupError::Config("Model name is required".to_string()));
+                    }
+                    self.settings.selected_model = Some(model_id.clone());
+                    print_success(&format!("Selected {}", model_id));
+                }
             }
-            self.settings.selected_model = Some(model_id.clone());
-            print_success(&format!("Selected {}", model_id));
-        } else {
-            // Unknown provider, manual entry
-            let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
-                .map_err(SetupError::Io)?;
-            if model_id.is_empty() {
-                return Err(SetupError::Config("Model name is required".to_string()));
-            }
-            self.settings.selected_model = Some(model_id.clone());
-            print_success(&format!("Selected {}", model_id));
         }
 
         Ok(())
@@ -2618,16 +2855,17 @@ impl SetupWizard {
 
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
     ///
-    /// These are the chicken-and-egg settings needed before the database is
-    /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    /// Only true chicken-and-egg settings are written here — things needed
+    /// before the database is connected: `DATABASE_BACKEND`, `DATABASE_URL`,
+    /// `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
+    /// channel config vars (Signal, Claude Code sandbox).
     ///
-    /// **Credentials are NOT written here.** API keys and OAuth tokens live
-    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
-    /// gracefully when credentials are missing during early startup, and the
-    /// re-resolution in `AppBuilder::build_all()` fills them in after
-    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
+    /// **LLM settings and credentials are NOT written here.** `LLM_BACKEND`,
+    /// base URLs, and model names are persisted to the DB via
+    /// `persist_settings()` and loaded by `Config::from_db_with_toml()`.
+    /// API keys live only in the encrypted secrets DB and are injected via
+    /// `inject_llm_keys_from_secrets()` after DB init.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
-        let registry = crate::llm::ProviderRegistry::load();
         let mut env_vars: Vec<(String, String)> = Vec::new();
 
         if let Some(ref backend) = self.settings.database_backend {
@@ -2641,66 +2879,6 @@ impl SetupWizard {
         }
         if let Some(ref url) = self.settings.libsql_url {
             env_vars.push(("LIBSQL_URL".to_string(), url.clone()));
-        }
-
-        // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
-        // Config::from_env() needs the backend before the DB is connected.
-        if let Some(ref backend) = self.settings.llm_backend {
-            env_vars.push(("LLM_BACKEND".to_string(), backend.clone()));
-        }
-        if let Some(ref url) = self.settings.openai_compatible_base_url {
-            env_vars.push(("LLM_BASE_URL".to_string(), url.clone()));
-        }
-        if let Some(ref url) = self.settings.ollama_base_url {
-            env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
-        }
-        if let Some(ref region) = self.settings.bedrock_region {
-            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
-        }
-        if self.settings.llm_backend.as_deref() == Some("bedrock") {
-            if let Some(ref model) = self.settings.selected_model {
-                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
-            }
-            if let Some(ref cross) = self.settings.bedrock_cross_region {
-                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
-            }
-            if let Some(ref profile) = self.settings.bedrock_profile {
-                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
-            }
-        }
-
-        // Model name: same chicken-and-egg — Config::from_env() resolves the
-        // model before the DB is connected, so we must persist it to .env.
-        // Write the backend-specific env var so the correct resolution path
-        // picks it up (looked up from the provider registry).
-        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
-        if self.settings.llm_backend.as_deref() != Some("bedrock")
-            && let Some(ref model) = self.settings.selected_model
-        {
-            let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
-            let model_env = registry.model_env_var(backend_str);
-            env_vars.push((model_env.to_string(), model.clone()));
-        }
-
-        // Also write provider-specific base URL env var if the provider
-        // defines one (e.g., GROQ doesn't need LLM_BASE_URL since its
-        // default is compiled in, but it doesn't hurt to be explicit).
-        if let Some(ref backend) = self.settings.llm_backend
-            && let Some(def) = registry.find(backend)
-            && let Some(ref base_url_env) = def.base_url_env
-            && let Some(ref base_url) = def.default_base_url
-            && base_url_env != "LLM_BASE_URL"
-            && base_url_env != "OLLAMA_BASE_URL"
-        {
-            env_vars.push((base_url_env.clone(), base_url.clone()));
-        }
-
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow
-        // via the thread-safe runtime env overlay).
-        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
-            && !api_key.is_empty()
-        {
-            env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
         }
 
         // Secrets master key (env var mode): write to .env so it's available
@@ -2963,6 +3141,7 @@ impl SetupWizard {
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
                 "bedrock" => "AWS Bedrock",
+                "openai_codex" => "OpenAI Codex",
                 other => other,
             };
             println!("  Provider: {}", display);
@@ -3531,6 +3710,36 @@ mod tests {
     }
 
     #[test]
+    fn test_github_copilot_setup_preserves_model_for_same_backend() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("github_copilot".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("github_copilot");
+
+        assert_eq!(wizard.settings.selected_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            wizard.settings.llm_backend.as_deref(),
+            Some("github_copilot")
+        );
+    }
+
+    #[test]
+    fn test_github_copilot_setup_clears_stale_model_on_switch() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-5".to_string());
+
+        wizard.set_llm_backend_preserving_model("github_copilot");
+
+        assert!(wizard.settings.selected_model.is_none());
+        assert_eq!(
+            wizard.settings.llm_backend.as_deref(),
+            Some("github_copilot")
+        );
+    }
+
+    #[test]
     fn test_is_openai_chat_model_includes_gpt5_and_filters_non_chat_variants() {
         assert!(is_openai_chat_model("gpt-5"));
         assert!(is_openai_chat_model("gpt-5-mini-2026-01-01"));
@@ -3884,6 +4093,39 @@ mod tests {
         assert!(
             config.nearai.api_key.is_none(),
             "config should have no api_key when env var is empty"
+        );
+    }
+
+    /// Regression: API key set via inject_single_var (the path used by
+    /// setup_api_key_provider during onboarding) must be picked up by
+    /// for_model_discovery() so model listing uses cloud-api auth
+    /// instead of falling back to session-token auth.
+    #[test]
+    fn test_model_discovery_picks_up_injected_var() {
+        use secrecy::ExposeSecret;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
+
+        crate::config::inject_single_var("NEARAI_API_KEY", "injected-wizard-key");
+        let config = build_nearai_model_fetch_config();
+
+        // Clean up: empty values are treated as unset by env_or_override()
+        // at every layer (real env, runtime overrides, INJECTED_VARS).
+        crate::config::inject_single_var("NEARAI_API_KEY", "");
+
+        assert!(
+            config.nearai.api_key.is_some(),
+            "for_model_discovery must read NEARAI_API_KEY from inject_single_var overlay"
+        );
+        assert_eq!(
+            config.nearai.api_key.as_ref().unwrap().expose_secret(),
+            "injected-wizard-key"
+        );
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key from overlay must select cloud-api base URL"
         );
     }
 
