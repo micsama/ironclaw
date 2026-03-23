@@ -142,6 +142,11 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return ironclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref()).await;
         }
+        Some(Command::Models(models_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_models_command(models_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             return ironclaw::cli::run_doctor_command().await;
@@ -846,10 +851,11 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_sender,
         http_interceptor,
-        transcription: config
-            .transcription
-            .create_provider()
-            .map(|p| Arc::new(ironclaw::transcription::TranscriptionMiddleware::new(p))),
+        transcription: config.transcription.create_provider().map(|p| {
+            Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(
+                p,
+            ))
+        }),
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
