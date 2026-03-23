@@ -18,6 +18,12 @@
 
 ## 二次开发工作流（向上游提 PR）
 
+
+运用第一性原理 思考，拒绝经验主义和路径盲从，不要假设我完全清楚目标，保持审慎，从原始需求和问题出发，若目标模糊请停下和我讨论，若目标清晰但路径非最优，请直接建议更短、更低成本的办法。
+所有回答必须分为两个部分：
+•直接执行：按照我当前的要求和逻辑，直接给出任务结果。
+• 深度交互：基于底层逻辑对我的原始需求进行“审慎挑战”。包括但不限于：质疑我的动机是否偏离目标（XY问题）、分析当前路径的弊端、并给出更优雅的替代方案。
+
 - **起点**：从 `upstream/staging` 新建 worktree 分支，命名如 `fix/xxx` 或 `feat/xxx`
 - **remote 配置**：
   - `origin` → `git@github.com:micsama/ironclaw.git`（你的 fork）
@@ -32,25 +38,7 @@ TODO / Bug 跟踪（2026-03-13 更新）
 
 ---
 
-### ✅ 已解决（upstream 已合入）
-
-**WASM 工具加载时无法从组件提取 description/parameters**
-- 上游 commit `94b448f`（Gabe, 2026-03-11）在 `src/tools/wasm/capabilities_schema.rs` 加入可选 `description`/`parameters` 字段，WasmToolLoader 读取并注入。
-- 已合入 staging，待 promote 到 main。
-- 临时解法（capabilities 文件手动加字段）可继续兼容，无需删除。
-
-**safety validator 空字符串透传**
-- 上游 PR #848（micsama, 2026-03-11）已修复 `src/safety/validator.rs`，已合入 main + staging + mic/dev。
-
----
-
 ### 🔧 计划提 PR（按优先级）
-
-**[P1] Bug: time 工具在 LLM 传空字符串时区参数时报错**
-- 症状：LLM 传 `timezone: ""` 时，`parse_timezone("")` 报 `Unknown timezone ''`。
-- 修法：`src/tools/builtin/time.rs` L250、L289，在 `.and_then(|v| v.as_str())` 后加 `.filter(|s| !s.is_empty())`。
-- 上游现有 PR #755（Changes Requested，策略不同：改了 dispatcher+validator，风险更高）。我们的修法只改 time.rs，Track B。
-- **下一步**：从 `upstream/staging` 新建 worktree `fix/time-empty-timezone`，提 PR 到 nearai/ironclaw staging。
 
 **[P2] Bug: `ironclaw onboard` 在离线/无注册中心环境下无法安装 WASM channel**
 - 症状：ImmortalWrt 上 onboard 选 Telegram 报 `Source fallback unavailable for 'telegram' after artifact install failed`。
